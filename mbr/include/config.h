@@ -45,17 +45,22 @@ typedef struct launchPath {
 
 // Settings struct, contains option flags and paths
 typedef struct {
-  uint8_t flags;     // Flags
+  uint8_t flags;      // Flags
   launchPath *paths; // Launch paths
   uint8_t isPSX;
   int8_t osdLanguage;
   int8_t osdScreenType;
+  int16_t timeout; // 菜单倒计时秒数: >0 倒计时, 0 跳过菜单直接进默认项, <0 无限等待
+  int8_t defaultApp; // 默认启动应用: 0=文件管理器 1=峰哥OPL 2=FMCB菜单 (直接进入/倒计时结束生效)
 } Settings;
 
 // Stores MBR settings
 extern Settings settings;
 
 int loadConfig(void);
+
+// 把当前 settings 写回 hdd0:__sysconf:/osdmenu/OSDMBR.CNF, 成功返回 0
+int saveConfig(void);
 
 // Attempts to load per-title GSM argument from the GSM_CONF_PATH/HOSDGSM_CONF_PATH depending on the device hint
 char *getOSDGSMArgument(const char *titleID);

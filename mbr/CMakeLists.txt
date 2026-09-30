@@ -10,6 +10,8 @@ set(EE_SOURCES
     src/hdd.c
     src/common.c
     src/disc.c
+    src/ui.c
+    src/font_cn.c
 )
 
 # Common files

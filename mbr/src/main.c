@@ -6,6 +6,7 @@
 #include "handlers.h"
 #include "hdd.h"
 #include "init.h"
+#include "ui.h"
 #include <fcntl.h>
 #include <kernel.h>
 #include <libpad.h>
@@ -31,9 +32,6 @@ __attribute__((noreturn)) void __entrypoint() {
 void _libcglue_timezone_update() {}
 void _libcglue_rtc_update() {}
 PS2_DISABLE_AUTOSTART_PTHREAD();
-
-// Initiailizes the pad library and returns the button pressed
-TriggerType readPad();
 
 int main(int argc, char *argv[]) {
   // Initialize IOP modules
@@ -84,8 +82,8 @@ int main(int argc, char *argv[]) {
   if ((argc > 1) && (!strcmp(argv[0], "rom0:MBRBOOT") || !strcmp(argv[0], "rom0:HDDBOOT")) && (strlen(argv[1]) > 0))
     return handleOSDArgs(argc, argv);
 
-  // Else, read controller inputs
-  TriggerType trigger = readPad();
+  // Else, show the Chinese menu with countdown
+  TriggerType trigger = uiMenuLoop();
 
   // Handle paths
   launchPath *lpath = settings.paths;
@@ -115,6 +113,8 @@ int main(int argc, char *argv[]) {
 
     // Try all defined paths
     while (lstr != NULL) {
+      free(args[0]);
+      args[0] = strdup(lstr->str);
       DPRINTF("Trying path %s\n", args[0]);
       res = handleConfigPath(argIdx, args);
       DPRINTF("Failed to start: %d\n", res);
@@ -133,120 +133,4 @@ int main(int argc, char *argv[]) {
   DPRINTF("All paths were tried, falling back to OSD\n");
   char *args[] = {"SkipHdd"};
   execOSD(1, args);
-}
-
-// Initiailizes the pad library and returns the button pressed
-TriggerType readPad() {
-  static char pad1Buf[256] __attribute__((aligned(64)));
-  static char pad2Buf[256] __attribute__((aligned(64)));
-  TriggerType t = TRIGGER_TYPE_AUTO;
-  struct padButtonStatus buttons;
-  uint32_t paddata = 0;
-
-  int res = padInit(0);
-  if (res != 1)
-    return t;
-
-  int retries = 10;
-  while (retries--) {
-    res = padPortOpen(0, 0, pad1Buf) | padPortOpen(1, 0, pad2Buf);
-    if (res != 0)
-      goto ready;
-  }
-  padEnd();
-  return t;
-
-ready:
-  for (int i = 0; i < 2; i++) {
-    retries = 5;
-    while ((res = padGetState(i, 0))) {
-      switch (res) {
-      case PAD_STATE_DISCONN:
-      case PAD_STATE_STABLE:
-      case PAD_STATE_FINDCTP1:
-        goto next;
-      case PAD_STATE_ERROR:
-        // Some PSX consoles have issues initializing the pad instantly
-        // Spamming padGetState without any delay results in padRead always returning 0
-        if (retries == 0)
-          goto next;
-        retries--;
-        sleep(1);
-      default:
-        continue;
-      }
-    }
-  next:
-  }
-
-  retries = 10;
-  while (retries--) {
-    for (int i = 0; i < 2; i++) {
-      if ((res = padRead(i, 0, &buttons)) != 0) {
-        paddata = (0xffff ^ buttons.btns) & ~paddata;
-        if (paddata & PAD_START) {
-          t = TRIGGER_TYPE_START;
-          goto exit;
-        }
-        if (paddata & PAD_SELECT) {
-          t = TRIGGER_TYPE_SELECT;
-          goto exit;
-        }
-        if (paddata & PAD_TRIANGLE) {
-          t = TRIGGER_TYPE_TRIANGLE;
-          goto exit;
-        }
-        if (paddata & PAD_CIRCLE) {
-          t = TRIGGER_TYPE_CIRCLE;
-          goto exit;
-        }
-        if (paddata & PAD_CROSS) {
-          t = TRIGGER_TYPE_CROSS;
-          goto exit;
-        }
-        if (paddata & PAD_SQUARE) {
-          t = TRIGGER_TYPE_SQUARE;
-          goto exit;
-        }
-        if (paddata & PAD_UP) {
-          t = TRIGGER_TYPE_UP;
-          goto exit;
-        }
-        if (paddata & PAD_DOWN) {
-          t = TRIGGER_TYPE_DOWN;
-          goto exit;
-        }
-        if (paddata & PAD_LEFT) {
-          t = TRIGGER_TYPE_LEFT;
-          goto exit;
-        }
-        if (paddata & PAD_RIGHT) {
-          t = TRIGGER_TYPE_RIGHT;
-          goto exit;
-        }
-        if (paddata & PAD_L1) {
-          t = TRIGGER_TYPE_L1;
-          goto exit;
-        }
-        if (paddata & PAD_L2) {
-          t = TRIGGER_TYPE_L2;
-          goto exit;
-        }
-        if (paddata & PAD_R1) {
-          t = TRIGGER_TYPE_R1;
-          goto exit;
-        }
-        if (paddata & PAD_R2) {
-          t = TRIGGER_TYPE_R2;
-          goto exit;
-        }
-      }
-    }
-  }
-
-exit:
-  padPortClose(0, 0);
-  padPortClose(1, 0);
-  padEnd();
-  return t;
 }

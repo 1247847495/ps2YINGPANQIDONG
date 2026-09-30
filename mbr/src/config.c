@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #define NEWLIB_PORT_AWARE
+#include <fileXio_rpc.h>
 #include <fileio.h>
 
 Settings settings;
@@ -20,6 +21,144 @@ void initConfig(void);
 char configPath[] = "pfs0:" HOSDMBR_CONF_PATH;
 char xfromConfigPath[] = "xfrom:" HOSDMBR_CONF_PATH;
 
+// anyi: 无配置文件时的内置默认启动路径
+static launchPath *findTrigger(TriggerType t) {
+  launchPath *p = settings.paths;
+  while (p) {
+    if (p->trigger == t)
+      return p;
+    p = p->next;
+  }
+  return NULL;
+}
+
+static launchPath *appendTrigger(TriggerType t) {
+  launchPath *np = malloc(sizeof(launchPath));
+  if (!np)
+    return NULL;
+  np->trigger = t;
+  np->paths = NULL;
+  np->args = NULL;
+  np->argCount = 0;
+  np->next = NULL;
+
+  launchPath **pp = &settings.paths;
+  while (*pp)
+    pp = &(*pp)->next;
+  *pp = np;
+  return np;
+}
+
+// 确保 AUTO(文件管理器) / START(OPL) / SELECT(FMCB菜单) 至少各有一条路径, 用户配置优先
+void ensureDefaultPaths(void) {
+  if (!findTrigger(TRIGGER_TYPE_AUTO)) {
+    launchPath *p = appendTrigger(TRIGGER_TYPE_AUTO);
+    if (p)
+      p->paths = addStr(p->paths, "hdd0:__sysconf:pfs:/FMCB/BOOT.ELF");
+  }
+  if (!findTrigger(TRIGGER_TYPE_START)) {
+    launchPath *p = appendTrigger(TRIGGER_TYPE_START);
+    if (p) {
+      p->paths = addStr(p->paths, "hdd0:__sysconf:pfs:/FMCB/BOOT1.ELF");
+      p->paths = addStr(p->paths, "hdd0:__boot:pfs:/BOOT.ELF");
+    }
+  }
+  if (!findTrigger(TRIGGER_TYPE_SELECT)) {
+    launchPath *p = appendTrigger(TRIGGER_TYPE_SELECT);
+    if (p)
+      p->paths = addStr(p->paths, "hdd0:__sysconf:pfs:/FMCB/BOOT.ELF");
+  }
+}
+
+// trigger -> CNF 键名 (boot_<key>), 未支持的键返回 NULL
+static const char *triggerKey(TriggerType t) {
+  switch (t) {
+  case TRIGGER_TYPE_AUTO:
+    return "auto";
+  case TRIGGER_TYPE_START:
+    return "start";
+  case TRIGGER_TYPE_SELECT:
+    return "select";
+  case TRIGGER_TYPE_TRIANGLE:
+    return "triangle";
+  case TRIGGER_TYPE_CIRCLE:
+    return "circle";
+  case TRIGGER_TYPE_CROSS:
+    return "cross";
+  case TRIGGER_TYPE_SQUARE:
+    return "square";
+  case TRIGGER_TYPE_UP:
+    return "up";
+  case TRIGGER_TYPE_DOWN:
+    return "down";
+  case TRIGGER_TYPE_LEFT:
+    return "left";
+  case TRIGGER_TYPE_RIGHT:
+    return "right";
+  case TRIGGER_TYPE_L1:
+    return "l1";
+  case TRIGGER_TYPE_L2:
+    return "l2";
+  case TRIGGER_TYPE_R1:
+    return "r1";
+  case TRIGGER_TYPE_R2:
+    return "r2";
+  default:
+    return NULL;
+  }
+}
+
+// 把当前 settings 生成 OSDMBR.CNF 写回配置分区, 成功返回 0
+// 注意: fileXioOpen 必须用 FIO_O_* (iomanX) 标志. newlib 头文件的 O_WRONLY=1,
+// 而 iomanX 里 1 = 只读, 会导致以只读方式打开, 所有写入静默失败
+int saveConfig(void) {
+  umountPFS(); // 确保干净的挂载状态
+
+  // 读写模式挂载配置分区
+  if (fileXioMount("pfs0:", HOSD_CONF_PARTITION, FIO_MT_RDWR))
+    return -1;
+
+  // 确保目录存在 (已存在时返回错误, 忽略)
+  fileXioMkdir("pfs0:/osdmenu", 0666);
+
+  int fd = fileXioOpen(configPath, FIO_O_WRONLY | FIO_O_CREAT | FIO_O_TRUNC, 0666);
+  if (fd < 0) {
+    fileXioUmount("pfs0:");
+    return -2;
+  }
+
+  char buf[PATH_MAX];
+  int len;
+  int ok = 1;
+
+  len = snprintf(buf, sizeof(buf), "timeout = %d\r\n", (int)settings.timeout);
+  ok &= (fileXioWrite(fd, buf, len) == len);
+  len = snprintf(buf, sizeof(buf), "default_app = %d\r\n", (int)settings.defaultApp);
+  ok &= (fileXioWrite(fd, buf, len) == len);
+  len = snprintf(buf, sizeof(buf), "cdrom_skip_ps2logo = %d\r\n", (settings.flags & FLAG_SKIP_PS2_LOGO) ? 1 : 0);
+  ok &= (fileXioWrite(fd, buf, len) == len);
+
+  for (launchPath *p = settings.paths; p; p = p->next) {
+    const char *key = triggerKey(p->trigger);
+    if (!key)
+      continue;
+    for (linkedStr *s = p->paths; s; s = s->next) {
+      len = snprintf(buf, sizeof(buf), "boot_%s = %s\r\n", key, s->str);
+      ok &= (fileXioWrite(fd, buf, len) == len);
+    }
+    for (linkedStr *a = p->args; a; a = a->next) {
+      len = snprintf(buf, sizeof(buf), "boot_%s_arg = %s\r\n", key, a->str);
+      ok &= (fileXioWrite(fd, buf, len) == len);
+    }
+  }
+
+  if (fileXioClose(fd) < 0)
+    ok = 0;
+  if (fileXioUmount("pfs0:") < 0)
+    ok = 0;
+  return ok ? 0 : -3;
+}
+
 int loadConfig() {
   // Init default values
   settings.flags = FLAG_ENABLE_GAMEID;
@@ -27,6 +166,8 @@ int loadConfig() {
   settings.isPSX = 0;
   settings.osdLanguage = -1;
   settings.osdScreenType = -1;
+  settings.timeout = 5; // 默认倒计时 5 秒
+  settings.defaultApp = 0; // 默认启动: 文件管理器
 
   int fd = open("rom0:PSXVER", O_RDONLY);
   if (fd >= 0) {
@@ -41,13 +182,16 @@ int loadConfig() {
   if (!file) {
     DPRINTF("Loading config from HDD\n");
     // Mount the config partition
-    if (mountPFS(HOSD_CONF_PARTITION))
+    if (mountPFS(HOSD_CONF_PARTITION)) {
+      ensureDefaultPaths(); // 无配置分区, 使用内置默认路径
       return -ENODEV;
+    }
 
     // Open the config file
     file = fopen(configPath, "rb");
     if (!file) {
       umountPFS();
+      ensureDefaultPaths(); // 无配置文件, 使用内置默认路径
       return -ENOENT;
     }
   }
@@ -159,6 +303,17 @@ int loadConfig() {
     }
 
     // Handle flags
+    if (!strncmp(lineBuffer, "timeout", 7)) {
+      // 菜单倒计时秒数
+      settings.timeout = (int16_t)atoi(valuePtr);
+      continue;
+    }
+    if (!strncmp(lineBuffer, "default_app", 11)) {
+      // 默认启动应用: 0=文件管理器 1=峰哥OPL 2=FMCB菜单
+      int d = atoi(valuePtr);
+      settings.defaultApp = (d >= 0 && d <= 2) ? (int8_t)d : 0;
+      continue;
+    }
     if (!strncmp(lineBuffer, "cdrom_skip_ps2logo", 18)) {
       if (atoi(valuePtr))
         settings.flags |= FLAG_SKIP_PS2_LOGO;
@@ -254,6 +409,7 @@ int loadConfig() {
   }
   fclose(file);
   umountPFS();
+  ensureDefaultPaths(); // 用户配置里缺的项用内置默认路径补全
   return 0;
 }
 
